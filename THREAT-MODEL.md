@@ -78,6 +78,19 @@ processes in the container.
 for its lifetime. Use `${file:...}` references to keep them out of
 `docker inspect` output, which shows environment variables.
 
+**Kerberos keytab is a long-lived bearer secret.** A keytab lets its holder
+authenticate as the account indefinitely, until the account's password is
+rotated (which invalidates every keytab derived from it, unlike a leaked
+password that can be changed while other holders keep working from other
+credentials). It never touches `${ENV}`/`docker inspect`: `keytab_path`
+points at a file under `./secrets`, read directly by `kinit`. The acquired
+ticket is cached in the container's `/tmp` tmpfs, so it does not survive a
+restart and is never written to the read-only root filesystem or to `./data`.
+Treat the keytab file itself exactly like a private key: readable only by
+the account that runs watchpost, and rotated (regenerate with `ktpass`, no
+disable/re-enable of the account needed) on the same schedule you'd rotate a
+WinRM password.
+
 **SQLite history is plaintext.** It holds hostnames, check messages, and
 values, not credentials. Protect `./data` like the config.
 
@@ -90,6 +103,10 @@ matters.
 - SNMP: a v3 user with a read-only view scoped to the MIB subtrees you poll.
 - WinRM: a dedicated domain account, not an administrator, granted remote
   management access and CIM read rights on the target classes, and denied
-  interactive logon. Certificate mapping removes the password entirely.
+  interactive logon. Certificate mapping removes the password entirely; so
+  does Kerberos (`transport: kerberos`), at the cost of holding a keytab
+  instead (see "Kerberos keytab is a long-lived bearer secret" above). Not a
+  gMSA: gMSA passwords are retrievable only by domain-joined Windows
+  computer accounts, which a container is not.
 - MQTT: an account with ACLs limited to subscribing to the topics you check
   and publishing under the alert `topic_prefix`.

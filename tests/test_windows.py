@@ -5,13 +5,14 @@ prove interoperability with a real Windows host; see docs/VERIFICATION.md.
 """
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
 
 from watchpost.checks import build_check
 from watchpost.checks.base import Result
-from watchpost.checks.windows import ps_quote
+from watchpost.checks.windows import KerberosError, ps_quote
 
 from .conftest import make_config
 
@@ -108,3 +109,79 @@ async def test_certificate_transport_passes_pem_paths(fake):
     await build_check(cfg.monitors[0], cfg).run()
     assert fake.kw["transport"] == "certificate"
     assert fake.kw["cert_pem"] == "/run/secrets/c.pem"
+
+
+def _kerberos_check(**cred_extra):
+    cfg = make_config(
+        [{"name": "w", "type": "winrm", "host": "h", "credential": "winkrb",
+          "mode": "service", "service": "WinRM"}],
+        credentials={"winkrb": {"type": "winrm", "transport": "kerberos",
+                                "principal": "svc@LAB.EXAMPLE.COM",
+                                "keytab_path": "/run/secrets/x.keytab", **cred_extra}},
+    )
+    return build_check(cfg.monitors[0], cfg)
+
+
+async def test_kerberos_transport_kinits_and_points_at_ccache(fake, monkeypatch):
+    monkeypatch.setattr("watchpost.checks.windows._kinit",
+                         lambda principal, keytab_path: "/tmp/fake-cc")
+    fake.reply = (0, "Running|Automatic", "")
+    await _kerberos_check().run()
+    assert fake.kw["transport"] == "kerberos"
+    assert fake.kw["kerberos_hostname_override"] == "h"
+    assert os.environ["KRB5CCNAME"] == "FILE:/tmp/fake-cc"
+
+
+async def test_kerberos_hostname_override_is_respected(fake, monkeypatch):
+    monkeypatch.setattr("watchpost.checks.windows._kinit",
+                         lambda principal, keytab_path: "/tmp/fake-cc")
+    fake.reply = (0, "Running|Automatic", "")
+    await _kerberos_check(kerberos_hostname_override="winsrv01.lab.example.com").run()
+    assert fake.kw["kerberos_hostname_override"] == "winsrv01.lab.example.com"
+
+
+async def test_kerberos_kinit_failure_is_reported_not_raised(fake, monkeypatch):
+    def boom(principal, keytab_path):
+        raise KerberosError("kinit failed: Preauthentication failed")
+    monkeypatch.setattr("watchpost.checks.windows._kinit", boom)
+    res = await _kerberos_check().run()
+    assert res.result is Result.FAIL
+    assert "Kerberos: kinit failed: Preauthentication failed" in res.message
+
+
+class TestKinit:
+    def setup_method(self):
+        from watchpost.checks import windows
+        windows._krb_last_kinit.clear()
+
+    def test_missing_keytab_raises(self, tmp_path):
+        from watchpost.checks.windows import _kinit
+        with pytest.raises(KerberosError, match="keytab not found"):
+            _kinit("svc@LAB.EXAMPLE.COM", str(tmp_path / "missing.keytab"))
+
+    def test_kinit_failure_raises_with_stderr(self, tmp_path, monkeypatch):
+        from watchpost.checks import windows
+        keytab = tmp_path / "x.keytab"
+        keytab.write_bytes(b"")
+
+        def fake_run(*a, **kw):
+            return SimpleNamespace(returncode=1, stdout="", stderr="kinit: Preauthentication failed")
+        monkeypatch.setattr(windows.subprocess, "run", fake_run)
+        with pytest.raises(KerberosError, match="Preauthentication failed"):
+            windows._kinit("svc@LAB.EXAMPLE.COM", str(keytab))
+
+    def test_successful_kinit_is_cached_until_ttl(self, tmp_path, monkeypatch):
+        from watchpost.checks import windows
+        keytab = tmp_path / "x.keytab"
+        keytab.write_bytes(b"")
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(windows.subprocess, "run", fake_run)
+
+        ccache1 = windows._kinit("svc@LAB.EXAMPLE.COM", str(keytab))
+        ccache2 = windows._kinit("svc@LAB.EXAMPLE.COM", str(keytab))
+        assert ccache1 == ccache2
+        assert len(calls) == 1  # second call was within the TTL, no re-kinit

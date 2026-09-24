@@ -80,7 +80,45 @@ remote WinRM access and read access to the CIM classes you query; it does
 not need to be an administrator if you delegate those rights. For
 `transport: certificate`, map a client certificate to the account on the
 target (WinRM certificate mapping) and mount the PEM and key under
-`./secrets`. Kerberos and CredSSP are not supported.
+`./secrets`. CredSSP is not supported.
+
+`transport: kerberos` is for domains where NTLM is disabled or being phased
+out (Microsoft has been pushing this for years). It authenticates as a
+regular AD service account, never a gMSA: a gMSA's password is retrievable
+only by domain-joined Windows computer accounts on its
+`PrincipalsAllowedToRetrieveManagedPassword` list, which a container has no
+way to be, so there is no such thing as "watchpost running as a gMSA".
+
+1. On a DC, create the service account and its keytab, e.g.:
+   ```powershell
+   ktpass -princ watchpost/monitor@LAB.EXAMPLE.COM -mapuser LAB\svc-watchpost `
+     -crypto AES256-SHA1 -ptype KRB5_NT_PRINCIPAL -out watchpost.keytab
+   ```
+   (`msktutil` is the equivalent tool if you manage the account from Linux.)
+   Use AES256, not RC4 — modern DCs support it and RC4 is what's actually
+   being deprecated alongside NTLM.
+2. Put `watchpost.keytab` under `./secrets` (never in `./config`, which the
+   container mounts read-only for config, not secrets, and which you may put
+   in git).
+3. Write a `krb5.conf` for your realm (`[libdefaults] default_realm =
+   LAB.EXAMPLE.COM`, `[realms]` with your KDC, `[domain_realm]` mapping your
+   DNS domain to the realm) and mount it read-only at `/etc/krb5.conf` (see
+   `docker-compose.yml`).
+4. In the credential, set `principal` to the keytab's principal and
+   `keytab_path` to where the keytab lands inside the container
+   (`/run/secrets/watchpost.keytab`), and reference it from a monitor as
+   usual.
+5. `kinit -kt` runs automatically before each poll (a ticket is cached for a
+   few hours, not re-acquired every time); nothing needs to be pre-authenticated
+   on the host. Time skew between the container and the KDC must stay under
+   about 5 minutes or Kerberos rejects the ticket outright — make sure the
+   Docker host's clock is NTP-synced.
+6. All Kerberos WinRM/WMI calls are serialized process-wide (unlike NTLM and
+   certificate transports, which run in parallel): the ticket cache is
+   selected via the `KRB5CCNAME` environment variable, which the underlying
+   GSSAPI library reads per-process, not per-thread, so concurrent Kerberos
+   calls for different accounts could otherwise race. This only limits
+   Kerberos-authenticated Windows polling throughput, not other check types.
 
 **Linux (SSH).** Agentless: reads /proc and runs df and systemctl, which
 every distribution has. Create a dedicated account with a key (ed25519) and

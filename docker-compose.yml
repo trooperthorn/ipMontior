@@ -13,6 +13,9 @@ services:
       - ./config:/config:ro
       - ./data:/data
       - ./secrets:/run/secrets:ro
+      # Only needed for the WinRM "kerberos" transport: your realm's krb5.conf.
+      # Keytabs themselves belong under ./secrets (referenced by keytab_path).
+      # - ./krb5.conf:/etc/krb5.conf:ro
     # Unprivileged ICMP: lets the process's group open ICMP datagram sockets.
     # This replaces CAP_NET_RAW, which is dropped below with everything else.
     sysctls:

@@ -19,7 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 import winrm
@@ -44,6 +49,55 @@ def ps_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+class KerberosError(Exception):
+    """kinit failed; the WinRM/WMI call was never attempted."""
+
+
+# One ticket cache file per (principal, keytab) pair, refreshed with `kinit
+# -k -t` well before the default 10-hour lifetime expires.
+_KRB_TICKET_TTL = 4 * 3600  # re-kinit after this many seconds, not on every poll
+_krb_lock = threading.Lock()
+_krb_last_kinit: dict[tuple[str, str], float] = {}
+
+# KRB5CCNAME is a process environment variable, read by the underlying GSSAPI
+# C library at connect time, not a per-thread setting. Two Kerberos WinRM
+# calls for different accounts running concurrently would race on it and
+# could authenticate as the wrong principal. Kerberos WinRM/WMI calls are
+# therefore fully serialized process-wide; NTLM and certificate transports
+# are unaffected and still run in parallel on WINRM_POOL.
+_KRB_CALL_LOCK = threading.Lock()
+
+
+def _krb_ccache_path(principal: str, keytab_path: str) -> str:
+    safe = "".join(c if c.isalnum() else "_" for c in f"{principal}_{keytab_path}")
+    return f"/tmp/watchpost-krb5cc-{safe}"
+
+
+def _kinit(principal: str, keytab_path: str) -> str:
+    """Ensure a fresh Kerberos ticket for principal exists; return its ccache path.
+
+    Caller must hold _KRB_CALL_LOCK.
+    """
+    key = (principal, keytab_path)
+    ccache = _krb_ccache_path(principal, keytab_path)
+    if time.monotonic() - _krb_last_kinit.get(key, 0.0) < _KRB_TICKET_TTL:
+        return ccache
+    if not Path(keytab_path).is_file():
+        raise KerberosError(f"keytab not found: {keytab_path}")
+    try:
+        proc = subprocess.run(
+            ["kinit", "-k", "-t", keytab_path, principal],
+            env={**os.environ, "KRB5CCNAME": f"FILE:{ccache}"},
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as err:
+        raise KerberosError(f"kinit failed to run: {err}") from err
+    if proc.returncode != 0:
+        raise KerberosError(f"kinit failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    _krb_last_kinit[key] = time.monotonic()
+    return ccache
+
+
 class _WsManCheck(Check):
     def _session(self) -> winrm.Session:
         m = self.monitor
@@ -60,11 +114,25 @@ class _WsManCheck(Check):
         if cred.transport == "certificate":
             kwargs["cert_pem"] = cred.cert_pem
             kwargs["cert_key_pem"] = cred.cert_key_pem
-        auth = (cred.username or "", cred.password or "")
+            auth = ("", "")
+        elif cred.transport == "kerberos":
+            ccache = _kinit(cred.principal, cred.keytab_path)
+            os.environ["KRB5CCNAME"] = f"FILE:{ccache}"
+            kwargs["kerberos_hostname_override"] = cred.kerberos_hostname_override or m.host
+            # HTTPKerberosAuth reads the ticket from KRB5CCNAME above; pywinrm
+            # still requires a non-None auth tuple even though it is unused.
+            auth = (cred.principal, "")
+        else:
+            auth = (cred.username or "", cred.password or "")
         return winrm.Session(f"{scheme}://{m.host}:{m.port}/wsman", auth=auth, **kwargs)
 
     def _run_ps_sync(self, script: str) -> tuple[int, str, str]:
-        r = self._session().run_ps(script)
+        cred = self.credential()
+        if cred.transport == "kerberos":
+            with _KRB_CALL_LOCK:
+                r = self._session().run_ps(script)
+        else:
+            r = self._session().run_ps(script)
         return (r.status_code, r.std_out.decode(errors="replace").strip(),
                 r.std_err.decode(errors="replace").strip())
 
@@ -79,6 +147,8 @@ class _WsManCheck(Check):
             return await self._probe()
         except asyncio.TimeoutError:
             return CheckResult.fail("WinRM call timed out")
+        except KerberosError as err:
+            return CheckResult.fail(f"Kerberos: {err}")
         except (WinRMTransportError, WinRMError, RequestException, OSError) as err:
             return CheckResult.fail(f"WinRM: {type(err).__name__}: {err}")
 

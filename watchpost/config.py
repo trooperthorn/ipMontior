@@ -78,20 +78,29 @@ class SnmpV3Credential(Strict):
 
 class WinRMCredential(Strict):
     type: Literal["winrm"]
-    # Kerberos and CredSSP are not offered: the image does not ship the GSSAPI
-    # or CredSSP extras, and offering a transport that fails at runtime is
-    # worse than rejecting it at config load.
-    transport: Literal["ntlm", "certificate"] = "ntlm"
+    # CredSSP is not offered: the image does not ship the CredSSP extra, and
+    # offering a transport that fails at runtime is worse than rejecting it
+    # at config load. Kerberos needs the image built with the kerberos extra
+    # (see Dockerfile) plus a keytab; it is not auto-detected here.
+    transport: Literal["ntlm", "certificate", "kerberos"] = "ntlm"
     username: str | None = None
     password: str | None = None
     cert_pem: str | None = None  # path to client certificate (certificate transport)
     cert_key_pem: str | None = None  # path to its private key
+    # kerberos transport: a service ticket is acquired with `kinit -kt` before
+    # each session (see watchpost/checks/windows.py), never a stored password.
+    principal: str | None = None  # e.g. watchpost@LAB.EXAMPLE.COM
+    keytab_path: str | None = None  # path to the keytab, mounted read-only
+    kerberos_hostname_override: str | None = None  # SPN host if it differs from the monitor's host
 
     @model_validator(mode="after")
     def _shape(self) -> "WinRMCredential":
         if self.transport == "certificate":
             if not (self.cert_pem and self.cert_key_pem):
                 raise ValueError("certificate transport needs cert_pem and cert_key_pem")
+        elif self.transport == "kerberos":
+            if not (self.principal and self.keytab_path):
+                raise ValueError("kerberos transport needs principal and keytab_path")
         elif not (self.username and self.password):
             raise ValueError(f"{self.transport} transport needs username and password")
         return self

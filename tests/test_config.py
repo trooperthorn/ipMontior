@@ -47,6 +47,20 @@ def test_disk_letter_is_constrained():
                       "mode": "disk", "disk": "C:' OR 1=1"}])
 
 
+def test_winrm_kerberos_requires_principal_and_keytab(tmp_path):
+    with pytest.raises(ConfigError, match="kerberos transport needs principal and keytab_path"):
+        load_config(_write(tmp_path, "credentials: {a: {type: winrm, transport: kerberos}}"))
+
+
+def test_winrm_kerberos_accepts_principal_and_keytab(tmp_path):
+    cfg = load_config(_write(tmp_path, """
+credentials:
+  a: {type: winrm, transport: kerberos, principal: svc@LAB.EXAMPLE.COM, keytab_path: /run/secrets/x.keytab}
+"""))
+    assert cfg.credentials["a"].principal == "svc@LAB.EXAMPLE.COM"
+    assert cfg.credentials["a"].keytab_path == "/run/secrets/x.keytab"
+
+
 def test_duplicate_slugs_rejected():
     with pytest.raises(ValueError, match="duplicate"):
         make_config([{"name": "Core Switch", "type": "ping", "host": "a"},

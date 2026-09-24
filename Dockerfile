@@ -4,13 +4,20 @@ FROM python:3.12-slim-bookworm
 
 # net-snmp CLI tools only. Not snmp-mibs-downloader: every query is numeric
 # and runs with -m "" so no MIB files are needed.
+#
+# krb5-user provides `kinit` (used by watchpost/checks/windows.py to turn a
+# keytab into a ticket for WinRM's kerberos transport) and libkrb5-3, both
+# kept at runtime. gcc and libkrb5-dev are needed only to compile pykerberos
+# against the krb5 headers and are removed again once pip install is done.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends snmp \
+ && apt-get install -y --no-install-recommends snmp krb5-user libkrb5-3 gcc libkrb5-dev \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+ && apt-get purge -y --auto-remove gcc libkrb5-dev \
+ && rm -rf /var/lib/apt/lists/*
 COPY watchpost ./watchpost
 
 # Fixed non-root UID/GID so volume ownership is predictable on the host.

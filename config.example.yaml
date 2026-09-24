@@ -77,6 +77,16 @@ credentials:
     transport: certificate
     cert_pem: /run/secrets/winrm-client.crt
     cert_key_pem: /run/secrets/winrm-client.key
+  # Kerberos WinRM: no password anywhere, only a keytab. Requires mounting
+  # /etc/krb5.conf and the keytab (see README "Windows (WinRM and WMI)").
+  win-monitor-krb:
+    type: winrm
+    transport: kerberos
+    principal: watchpost@LAB.EXAMPLE.COM
+    keytab_path: /run/secrets/watchpost.keytab
+    # Only set this if the target's SPN host differs from the monitor's
+    # `host:` (for example, a CNAME or load-balanced name).
+    # kerberos_hostname_override: winsrv01.lab.example.com
   linux-key:
     type: ssh
     username: watchpost
