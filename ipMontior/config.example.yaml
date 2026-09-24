@@ -1,0 +1,477 @@
+# watchpost example configuration.
+# Addresses use the RFC 5737 documentation ranges and *.lab.example names.
+# Secrets are references, never literals:
+#   ${NAME}              environment variable (startup fails if unset)
+#   ${file:/run/secrets/name}   file contents, trailing newline stripped
+
+server:
+  listen: 0.0.0.0
+  port: 8080
+  db_path: /data/watchpost.db
+  retention_days: 30
+  # Optional HTTP basic auth for the dashboard and API. Put a TLS reverse
+  # proxy in front if you enable this, basic auth over plain HTTP is not
+  # confidential.
+  basic_auth_user: ops
+  basic_auth_password: ${WATCHPOST_UI_PASSWORD}
+
+# Capacity forecasting, applied to monitors with forecast: true.
+forecast:
+  lookback_days: 7      # history fitted
+  min_points: 24        # hourly buckets needed before projecting
+  min_span_hours: 24
+  horizon_days: 90      # further-out crossings are reported as beyond horizon
+  min_r2: 0.5           # below this a projection is labelled low confidence
+
+# Discovery: `python -m watchpost --config ... --discover --out proposals.yaml`
+# scans these targets and writes proposed monitors. It changes nothing.
+discovery:
+  targets: [192.0.2.0/24, 198.51.100.10-198.51.100.40, dc01.lab.example]
+  exclude: [192.0.2.1]
+  credentials: [snmp-v3-core, snmp-v2-legacy, win-monitor, linux-key, truenas-ro, pve-audit,
+                esxi-ro, ha-token, unifi-key, technitium-token, mqtt-monitor]
+  api_require_valid_tls: true             # TrueNAS/Proxmox/vSphere: pin or CA-sign first
+  max_guests: 50
+  # Also scan every enabled, recently active computer account in AD.
+  directory:
+    server: dc01.lab.example              # must match the DC's LDAPS certificate
+    credential: ad-reader
+    base_dn: "DC=lab,DC=example"          # or an OU to narrow it
+    stale_days: 60
+    os_include: []                        # e.g. ["Windows Server", "Linux"]
+  ssh_known_hosts: /config/known_hosts
+  ssh_trust_on_first_use: true            # key credentials only; keys recorded for review
+  docker_command: docker                  # or "sudo -n docker"; see THREAT-MODEL.md
+  ca_bundle: /config/lab-root-ca.pem     # WinRM creds are sent only if TLS validates
+  max_auth_failures: 3                   # a rejected credential is retired after this
+  max_hosts: 4096
+  concurrency: 64
+  timeout: 1.5
+
+defaults:
+  interval: 60          # seconds between polls
+  timeout: 5            # seconds per probe
+  failures_to_down: 3   # consecutive FAILs before DOWN (and an alert)
+  recoveries_to_up: 1   # consecutive OKs before UP
+
+credentials:
+  snmp-v2-legacy:
+    type: snmpv2c
+    community: ${SNMP_COMMUNITY}
+  snmp-v3-core:
+    type: snmpv3
+    username: watchpost
+    level: authPriv
+    auth_protocol: SHA-256
+    auth_password: ${SNMP_AUTH}
+    priv_protocol: AES
+    priv_password: ${SNMP_PRIV}
+  win-monitor:
+    type: winrm
+    transport: ntlm
+    username: LAB\svc-watchpost
+    password: ${WINRM_PASSWORD}
+  # Certificate-mapped WinRM (no password on the wire or on disk here).
+  win-monitor-cert:
+    type: winrm
+    transport: certificate
+    cert_pem: /run/secrets/winrm-client.crt
+    cert_key_pem: /run/secrets/winrm-client.key
+  linux-key:
+    type: ssh
+    username: watchpost
+    private_key: /run/secrets/watchpost_ed25519   # key-based; no password needed
+  ad-reader:
+    type: ldap
+    bind_user: svc-watchpost@lab.example
+    password: ${AD_PASSWORD}
+  truenas-ro:
+    type: truenas
+    username: watchpost              # a user with the READONLY_ADMIN role
+    api_key: ${TRUENAS_API_KEY}
+  pve-audit:
+    type: proxmox
+    token_id: watchpost@pve!monitor  # token on a user with PVEAuditor
+    secret: ${PROXMOX_TOKEN_SECRET}
+  esxi-ro:
+    type: vsphere
+    username: watchpost@lab.example  # a read-only role on the host or vCenter
+    password: ${VSPHERE_PASSWORD}
+  ha-token:
+    type: homeassistant
+    token: ${HA_TOKEN}               # long-lived token of a dedicated non-admin user
+  unifi-key:
+    type: unifi
+    api_key: ${UNIFI_API_KEY}        # one key serves Network and Protect
+  technitium-token:
+    type: technitium
+    token: ${TECHNITIUM_TOKEN}       # user with only Dashboard: View
+  mqtt-monitor:
+    type: mqtt
+    username: watchpost
+    password: ${MQTT_PASSWORD}
+
+alerts:
+  - name: phone
+    type: ntfy
+    url: https://ntfy.lab.example/homelab
+    token: ${NTFY_TOKEN}
+    notify_on: [down, up]
+  - name: home-assistant
+    type: mqtt
+    host: mqtt.lab.example
+    port: 8883
+    tls: true
+    ca_bundle: /config/lab-root-ca.pem
+    credential: mqtt-monitor
+    topic_prefix: watchpost
+    notify_on: [down, warn, up]
+
+monitors:
+  # ---------------------------------------------------------- reachability
+  - name: Gateway
+    group: network
+    type: ping
+    host: 192.0.2.1
+    interval: 30
+    thresholds: {direction: above, warn: 20, crit: 100}   # avg RTT ms
+
+  - name: Core switch
+    group: network
+    type: ping
+    host: 192.0.2.2
+
+  - name: NAS SSH
+    group: storage
+    type: tcp
+    host: nas.lab.example
+    port: 22
+    expect: SSH-2.0
+    depends_on: [Core switch]     # UNREACHABLE, not DOWN, while the switch is down
+
+  - name: Guest AP
+    group: network
+    type: ping
+    host: 192.0.2.30
+    depends_on: [Core switch]
+    critical: false               # can turn "network" WARN, never DOWN
+
+  # ---------------------------------------------------------- web and names
+  - name: Home Assistant UI
+    group: apps
+    type: http
+    url: https://ha.lab.example:8123/manifest.json
+    expect_status: [200]
+    ca_bundle: /config/lab-root-ca.pem
+
+  - name: Internal DNS
+    group: network
+    type: dns
+    query: ha.lab.example
+    record: A
+    nameserver: 192.0.2.53
+    expect: [192.0.2.20]
+
+  - name: HA certificate
+    group: pki
+    type: tls_cert
+    host: ha.lab.example
+    port: 8123
+    ca_bundle: /config/lab-root-ca.pem
+    interval: 3600
+    # default thresholds: warn at 21 days, fail at 7
+
+  # ------------------------------------------------------------------- SNMP
+  - name: Core switch uplink
+    group: network
+    type: snmp
+    host: 192.0.2.2
+    credential: snmp-v3-core
+    mode: interface
+    interface: "Port 24"            # ifName, ifDescr, or numeric ifIndex
+    thresholds: {direction: above, warn: 70, crit: 90}   # % utilization
+    forecast: true                  # project when the trend reaches 70% and 90%
+
+  - name: Core switch uptime
+    group: network
+    type: snmp
+    host: 192.0.2.2
+    credential: snmp-v3-core
+    mode: uptime                    # WARNs once when the agent restarts
+
+  - name: Pi CPU
+    group: servers
+    type: snmp
+    host: pi.lab.example
+    credential: snmp-v3-core
+    mode: cpu
+    thresholds: {direction: above, warn: 85, crit: 97}
+
+  - name: Pi memory
+    group: servers
+    type: snmp
+    host: pi.lab.example
+    credential: snmp-v3-core
+    mode: memory
+    thresholds: {direction: above, warn: 90, crit: 97}
+    depends_on: [Core switch]
+
+  - name: UPS battery
+    group: power
+    type: snmp
+    host: 192.0.2.40
+    credential: snmp-v2-legacy
+    mode: oid
+    oid: .1.3.6.1.2.1.33.1.2.4.0    # UPS-MIB upsEstimatedChargeRemaining
+    thresholds: {direction: below, warn: 60, crit: 30}
+
+  # ------------------------------------------------- Windows (over WinRM)
+  - name: DC01 Netlogon
+    group: identity
+    type: winrm
+    host: dc01.lab.example
+    credential: win-monitor
+    ca_bundle: /config/lab-root-ca.pem
+    mode: service
+    service: Netlogon
+
+  - name: DC01 C drive
+    group: identity
+    type: winrm
+    host: dc01.lab.example
+    credential: win-monitor
+    ca_bundle: /config/lab-root-ca.pem
+    mode: disk
+    disk: "C:"
+    thresholds: {direction: above, warn: 85, crit: 95}
+    forecast: true
+
+  - name: CA01 cert services
+    group: pki
+    type: winrm
+    host: ca01.lab.example
+    credential: win-monitor-cert
+    ca_bundle: /config/lab-root-ca.pem
+    mode: service
+    service: CertSvc
+
+  - name: DC01 stopped auto services
+    group: identity
+    type: wmi
+    host: dc01.lab.example
+    credential: win-monitor
+    ca_bundle: /config/lab-root-ca.pem
+    query: "SELECT Name FROM Win32_Service WHERE StartMode='Auto' AND State<>'Running'"
+    property: Name
+    aggregate: count
+    thresholds: {direction: above, warn: 1, crit: 3}
+
+  # ------------------------------------------------------ Linux (over SSH)
+  - name: Pi root disk
+    group: linux
+    type: linux
+    host: pi.lab.example
+    credential: linux-key
+    known_hosts: /config/known_hosts
+    mode: disk
+    mount: /
+    thresholds: {direction: above, warn: 85, crit: 95}
+    forecast: true
+
+  - name: Pi docker daemon
+    group: linux
+    type: linux
+    host: pi.lab.example
+    credential: linux-key
+    mode: service
+    service: docker
+
+  # ------------------------------------------------------ Docker (over SSH)
+  - name: Pi containers
+    group: docker
+    type: docker
+    host: pi.lab.example
+    credential: linux-key
+    mode: summary          # FAIL if any container is unhealthy or stopped despite its restart policy
+
+  - name: Home Assistant container
+    group: docker
+    type: docker
+    host: pi.lab.example
+    credential: linux-key
+    mode: container
+    container: homeassistant
+
+  # ---------------------------------------------------------------- TrueNAS
+  - name: NAS pools
+    group: storage
+    type: truenas
+    host: nas.lab.example
+    credential: truenas-ro
+    ca_bundle: /config/lab-root-ca.pem
+    mode: pools                          # FAIL on any unhealthy pool
+
+  - name: NAS pool tank
+    group: storage
+    type: truenas
+    host: nas.lab.example
+    credential: truenas-ro
+    ca_bundle: /config/lab-root-ca.pem
+    mode: pool
+    pool: tank
+    thresholds: {direction: above, warn: 80, crit: 90}
+    forecast: true
+
+  - name: NAS alerts
+    group: storage
+    type: truenas
+    host: nas.lab.example
+    credential: truenas-ro
+    ca_bundle: /config/lab-root-ca.pem
+    mode: alerts
+    min_alert_level: WARNING
+
+  # ---------------------------------------------------------------- Proxmox
+  - name: pve1 node
+    group: proxmox
+    type: proxmox
+    host: pve1.lab.example
+    credential: pve-audit
+    ca_bundle: /config/pinned/pve1.pem   # the node's own self-signed cert, pinned
+    mode: node
+    node: pve1
+
+  - name: pve1 pihole CT
+    group: proxmox
+    type: proxmox
+    host: pve1.lab.example
+    credential: pve-audit
+    ca_bundle: /config/pinned/pve1.pem
+    mode: guest
+    guest: "200"                         # VMID, or the guest's name
+    depends_on: [pve1 node]
+
+  # ---------------------------------------------------------------- vSphere
+  - name: esxi01
+    group: vsphere
+    type: vsphere
+    host: esxi01.lab.example
+    credential: esxi-ro
+    ca_bundle: /config/lab-root-ca.pem
+    mode: host                           # connection, maintenance, alarm colour
+
+  - name: esxi01 datastore1
+    group: vsphere
+    type: vsphere
+    host: esxi01.lab.example
+    credential: esxi-ro
+    ca_bundle: /config/lab-root-ca.pem
+    mode: datastore
+    entity: datastore1
+    thresholds: {direction: above, warn: 85, crit: 95}
+    forecast: true
+
+  - name: esxi01 VM dc02
+    group: vsphere
+    type: vsphere
+    host: esxi01.lab.example
+    credential: esxi-ro
+    ca_bundle: /config/lab-root-ca.pem
+    mode: vm
+    entity: dc02
+    depends_on: [esxi01]
+
+  # --------------------------------------------------------- Home Assistant
+  - name: Home Assistant API
+    group: homeassistant
+    type: homeassistant
+    host: ha.lab.example
+    credential: ha-token
+    https: false              # HA's default; the token then crosses the LAN in cleartext
+    mode: api
+
+  - name: HA unavailable entities
+    group: homeassistant
+    type: homeassistant
+    host: ha.lab.example
+    credential: ha-token
+    https: false
+    mode: unavailable
+    ignore: ["media_player.*_zone4"]      # known-dead entities, fnmatch patterns
+    thresholds: {direction: above, warn: 1, crit: 25}
+
+  - name: NAS temperature (from HA)
+    group: homeassistant
+    type: homeassistant
+    host: ha.lab.example
+    credential: ha-token
+    https: false
+    mode: entity
+    entity_id: sensor.nas_temperature
+    thresholds: {direction: above, warn: 45, crit: 55}
+
+  # ---------------------------------------------------------- UniFi Network
+  - name: UniFi devices
+    group: unifi
+    type: unifi_network
+    host: unifi.lab.example
+    credential: unifi-key
+    ca_bundle: /config/pinned/unifi.pem
+    mode: devices             # FAIL when any adopted device is not ONLINE
+    ignore: ["Old Garage Switch"]
+
+  - name: Gateway CPU
+    group: unifi
+    type: unifi_network
+    host: unifi.lab.example
+    credential: unifi-key
+    ca_bundle: /config/pinned/unifi.pem
+    mode: device_cpu
+    device: Gateway           # name or MAC
+    thresholds: {direction: above, warn: 80, crit: 90}
+
+  # ---------------------------------------------------------- UniFi Protect
+  - name: Protect cameras
+    group: protect
+    type: unifi_protect
+    host: unifi.lab.example
+    credential: unifi-key
+    ca_bundle: /config/pinned/unifi.pem
+    mode: cameras             # FAIL when any camera is not CONNECTED
+
+  # ------------------------------------------------------------- Technitium
+  - name: Technitium SERVFAIL rate
+    group: dns
+    type: technitium
+    host: dns.lab.example
+    credential: technitium-token
+    mode: stats
+    thresholds: {direction: above, warn: 2, crit: 10}
+
+  - name: Technitium answers
+    group: dns
+    type: dns
+    query: ha.lab.example
+    nameserver: 192.0.2.53
+    depends_on: [Technitium SERVFAIL rate]
+
+  # ------------------------------------------------------------------ MQTT
+  - name: Broker
+    group: apps
+    type: mqtt
+    host: mqtt.lab.example
+    port: 8883
+    tls: true
+    ca_bundle: /config/lab-root-ca.pem
+    credential: mqtt-monitor
+
+  - name: Zigbee2MQTT bridge
+    group: apps
+    type: mqtt
+    host: mqtt.lab.example
+    port: 8883
+    tls: true
+    ca_bundle: /config/lab-root-ca.pem
+    credential: mqtt-monitor
+    topic: zigbee2mqtt/bridge/state
+    expect: online

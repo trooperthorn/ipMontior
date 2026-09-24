@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>watchpost</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <h1>watchpost</h1>
+  <div id="summary" aria-live="polite"></div>
+  <label class="filter"><input type="checkbox" id="problems-only"> problems only</label>
+</header>
+<main id="groups"></main>
+<section id="capacity-panel" hidden>
+  <h2>Capacity outlook</h2>
+  <ol id="capacity"></ol>
+</section>
+<section id="events-panel">
+  <h2>Recent state changes</h2>
+  <ol id="events"></ol>
+</section>
+<footer id="footer"></footer>
+<template id="row-tpl">
+  <li class="mon">
+    <button class="head" type="button" aria-expanded="false">
+      <span class="dot"></span>
+      <span class="name"></span>
+      <span class="val"></span>
+    </button>
+    <div class="sub"><span class="type"></span> <span class="target"></span></div>
+    <div class="msg"></div>
+    <div class="fc"></div>
+    <div class="more" hidden>
+      <svg class="spark" viewBox="0 0 300 60" preserveAspectRatio="none" role="img"></svg>
+      <div class="avail"></div>
+      <ol class="mon-events"></ol>
+    </div>
+  </li>
+</template>
+<script src="/static/app.js"></script>
+</body>
+</html>

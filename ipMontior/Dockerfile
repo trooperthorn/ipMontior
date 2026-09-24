@@ -1,0 +1,27 @@
+# Multi-arch: python:3.12-slim-bookworm publishes amd64 and arm64, so the
+# same file builds on the Pi 5 and on x86.
+FROM python:3.12-slim-bookworm
+
+# net-snmp CLI tools only. Not snmp-mibs-downloader: every query is numeric
+# and runs with -m "" so no MIB files are needed.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends snmp \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY watchpost ./watchpost
+
+# Fixed non-root UID/GID so volume ownership is predictable on the host.
+RUN groupadd --gid 10001 watchpost \
+ && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin watchpost \
+ && mkdir -p /data && chown 10001:10001 /data
+USER 10001:10001
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status == 200 else 1)"
+ENTRYPOINT ["python", "-m", "watchpost"]
+CMD ["--config", "/config/watchpost.yaml"]

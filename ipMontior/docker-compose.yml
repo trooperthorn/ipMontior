@@ -1,0 +1,26 @@
+services:
+  watchpost:
+    build: .
+    image: watchpost:local
+    container_name: watchpost
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # Publishes on every host interface. To limit the dashboard to one
+      # address (for example the management VLAN), use "192.0.2.10:8080:8080".
+      - "8080:8080"
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+      - ./secrets:/run/secrets:ro
+    # Unprivileged ICMP: lets the process's group open ICMP datagram sockets.
+    # This replaces CAP_NET_RAW, which is dropped below with everything else.
+    sysctls:
+      net.ipv4.ping_group_range: "0 2147483647"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    # SQLite in /data is the only persistent write.

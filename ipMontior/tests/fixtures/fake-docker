@@ -1,0 +1,23 @@
+#!/bin/sh
+# Stand-in for the docker CLI in SSH tests. Emits the shapes watchpost parses.
+# Containers: web (running, healthy), db (running, unhealthy),
+#             worker (exited, restart=unless-stopped), oneshot (exited, restart=no)
+dir="$(dirname "$0")"
+restarts="$(cat "$dir/web-restarts" 2>/dev/null || echo 0)"
+case "$*" in
+  "info --format {{.ServerVersion}}") echo "27.3.1" ;;
+  "ps --no-trunc --format {{json .}}")
+    echo '{"Names":"web","Image":"nginx:1.27","State":"running","Status":"Up 2 hours (healthy)"}'
+    echo '{"Names":"db","Image":"postgres:16","State":"running","Status":"Up 2 hours (unhealthy)"}' ;;
+  "inspect --type container --format {{json .State}}|{{.RestartCount}} -- web")
+    echo "{\"Status\":\"running\",\"Running\":true,\"StartedAt\":\"2026-09-23T10:00:00Z\",\"Health\":{\"Status\":\"healthy\"}}|$restarts" ;;
+  "inspect --type container --format {{json .State}}|{{.RestartCount}} -- db")
+    echo '{"Status":"running","Running":true,"StartedAt":"2026-09-23T10:00:00Z","Health":{"Status":"unhealthy"}}|0' ;;
+  "inspect --type container --format {{json .State}}|{{.RestartCount}} -- worker")
+    echo '{"Status":"exited","Running":false,"ExitCode":137,"StartedAt":"2026-09-23T09:00:00Z"}|3' ;;
+  "inspect --type container --format "*) echo "Error: No such container: ${6}" >&2; exit 1 ;;
+  "ps -aq --no-trunc") printf 'aaa\nbbb\nccc\nddd\n' ;;
+  "inspect --format {{.Name}}|{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}|{{if .State.Health}}{{.State.Health.Status}}{{end}} -- aaa bbb ccc ddd")
+    printf '/web|running|unless-stopped|healthy\n/db|running|always|unhealthy\n/worker|exited|unless-stopped|\n/oneshot|exited|no|\n' ;;
+  *) echo "fake-docker: unhandled: $*" >&2; exit 2 ;;
+esac
