@@ -1,0 +1,17 @@
+# Runtime state created by `docker compose up` (README quick start)
+/config/
+/data/
+/secrets/
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
